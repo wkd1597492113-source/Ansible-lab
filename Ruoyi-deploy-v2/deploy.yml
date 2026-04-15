@@ -1,0 +1,7 @@
+---
+- name: Deploy RuoYi-Vue backend and frontend
+  hosts: web
+  become: true
+  serial: 1
+  roles:
+    - role: ruoyi_deploy

@@ -1,0 +1,25 @@
+---
+ruoyi_repo: "https://github.com/wkd1597492113-source/RuoYi-Vue.git"
+ruoyi_branch: "main"
+ruoyi_root: "/home/user/RuoYi-Vue"
+ruoyi_upload_path: "/home/user/ruoyi/uploadPath"
+ruoyi_log_path: "/home/ruoyi/logs"
+
+mysql_database: "ry-vue"
+mysql_admin_user: "root"
+mysql_admin_password: "root"
+mysql_user: "ruoyi"
+mysql_password: "ruoyi123"
+
+backend_port: 8080
+frontend_port: 1024
+frontend_build_path: "/home/user/ruoyi/frontend-dist"
+frontend_api_base_url: "http://{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}:{{ backend_port }}"
+
+service_name: "ruoyi-admin"
+service_user: "user"
+frontend_service_name: "ruoyi-ui"
+frontend_service_user: "root"
+
+ry_sql_file: "{{ ruoyi_root }}/sql/ry_20260321.sql"
+quartz_sql_file: "{{ ruoyi_root }}/sql/quartz.sql"

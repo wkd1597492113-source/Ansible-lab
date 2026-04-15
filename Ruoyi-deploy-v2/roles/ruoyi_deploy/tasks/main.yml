@@ -1,0 +1,226 @@
+---
+- name: Validate required variables
+  assert:
+    that:
+      - mysql_admin_user | length > 0
+      - mysql_admin_password | length > 0
+      - mysql_password | length > 0
+      - mysql_user | length > 0
+      - ruoyi_upload_path | length > 0
+      - service_user | length > 0
+    fail_msg: "mysql_admin_user / mysql_admin_password / mysql_user / mysql_password / ruoyi_upload_path / service_user 不能为空"
+
+- name: Install backend dependencies
+  apt:
+    name:
+      - openjdk-17-jre-headless
+      - maven
+      - mysql-server
+      - redis-server
+      - git
+      - nodejs
+      - npm
+    state: present
+    update_cache: true
+  register: apt_install_result
+  retries: 6
+  delay: 15
+  until: apt_install_result is succeeded
+
+- name: Ensure mysql service is started and enabled
+  systemd:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Ensure redis service is started and enabled
+  systemd:
+    name: redis-server
+    state: started
+    enabled: true
+
+- name: Clone RuoYi-Vue source code
+  git:
+    repo: "{{ ruoyi_repo }}"
+    dest: "{{ ruoyi_root }}"
+    version: "{{ ruoyi_branch }}"
+    force: true
+
+- name: Ensure upload directory exists
+  file:
+    path: "{{ ruoyi_upload_path }}"
+    state: directory
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0755"
+
+- name: Ensure backend log directory exists
+  file:
+    path: "{{ ruoyi_log_path }}"
+    state: directory
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0755"
+
+- name: Update ruoyi upload path in application.yml
+  lineinfile:
+    path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application.yml"
+    regexp: '^  profile:'
+    line: "  profile: {{ ruoyi_upload_path }}"
+
+- name: Update mysql jdbc url in application-druid.yml
+  replace:
+    path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+    regexp: "url:\\s*jdbc:mysql://localhost:3306/ry-vue\\?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
+    replace: "url: jdbc:mysql://localhost:3306/{{ mysql_database }}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
+
+- name: Update mysql username in application-druid.yml
+  replace:
+    path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+    regexp: "username:\\s*root"
+    replace: "username: {{ mysql_user }}"
+
+- name: Update mysql password in application-druid.yml
+  replace:
+    path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+    regexp: "password:\\s*password"
+    replace: "password: {{ mysql_password }}"
+
+- name: Ensure business database exists
+  shell: >
+    mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}'
+    -e "CREATE DATABASE IF NOT EXISTS \`{{ mysql_database }}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+  args:
+    executable: /bin/bash
+
+- name: Ensure application mysql user exists and has grants
+  shell: >
+    mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ mysql_user }}'@'localhost' IDENTIFIED BY '{{ mysql_password }}';
+    GRANT ALL PRIVILEGES ON \`{{ mysql_database }}\`.* TO '{{ mysql_user }}'@'localhost';
+    FLUSH PRIVILEGES;"
+  args:
+    executable: /bin/bash
+
+- name: Check whether business schema is initialized
+  shell: >
+    mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' -Nse
+    "SELECT COUNT(*) FROM information_schema.tables
+    WHERE table_schema='{{ mysql_database }}' AND table_name='sys_user';"
+  args:
+    executable: /bin/bash
+  register: ruoyi_schema_ready
+  changed_when: false
+
+- name: Import ry sql when schema is missing
+  shell: >
+    mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' {{ mysql_database }} < {{ ry_sql_file }}
+  args:
+    executable: /bin/bash
+  when: ruoyi_schema_ready.stdout | trim == "0"
+
+- name: Import quartz sql when schema is missing
+  shell: >
+    mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' {{ mysql_database }} < {{ quartz_sql_file }}
+  args:
+    executable: /bin/bash
+  when: ruoyi_schema_ready.stdout | trim == "0"
+
+- name: Build backend jar package
+  shell: mvn clean package -DskipTests
+  args:
+    chdir: "{{ ruoyi_root }}"
+    executable: /bin/bash
+
+- name: Set frontend production API base url
+  lineinfile:
+    path: "{{ ruoyi_root }}/ruoyi-ui/.env.production"
+    regexp: "^VUE_APP_BASE_API="
+    line: "VUE_APP_BASE_API={{ frontend_api_base_url }}"
+
+- name: Install frontend dependencies
+  shell: npm install
+  args:
+    chdir: "{{ ruoyi_root }}/ruoyi-ui"
+    executable: /bin/bash
+
+- name: Build frontend static files
+  shell: npm run build:prod
+  args:
+    chdir: "{{ ruoyi_root }}/ruoyi-ui"
+    executable: /bin/bash
+
+- name: Install frontend static server
+  shell: npm install -g serve@13
+  args:
+    executable: /bin/bash
+
+- name: Get serve binary path
+  shell: which serve
+  args:
+    executable: /bin/bash
+  register: serve_bin
+  changed_when: false
+
+- name: Remove existing frontend artifact directory
+  file:
+    path: "{{ frontend_build_path }}"
+    state: absent
+
+- name: Ensure frontend artifact directory exists
+  file:
+    path: "{{ frontend_build_path }}"
+    state: directory
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: "0755"
+
+- name: Copy frontend dist artifacts
+  copy:
+    src: "{{ ruoyi_root }}/ruoyi-ui/dist/"
+    dest: "{{ frontend_build_path }}/"
+    remote_src: true
+    owner: "{{ service_user }}"
+    group: "{{ service_user }}"
+    mode: preserve
+
+- name: Install systemd service for frontend
+  template:
+    src: "frontend.service.j2"
+    dest: "/etc/systemd/system/{{ frontend_service_name }}.service"
+    mode: "0644"
+
+- name: Install systemd service for backend
+  template:
+    src: "backend.service.j2"
+    dest: "/etc/systemd/system/{{ service_name }}.service"
+    mode: "0644"
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+
+- name: Enable and restart backend service
+  systemd:
+    name: "{{ service_name }}"
+    state: restarted
+    enabled: true
+
+- name: Enable and restart frontend service
+  systemd:
+    name: "{{ frontend_service_name }}"
+    state: restarted
+    enabled: true
+
+- name: Wait for backend port to be ready
+  wait_for:
+    host: "127.0.0.1"
+    port: "{{ backend_port }}"
+    delay: 3
+    timeout: 120
+
+- name: Wait for frontend port to be ready
+  wait_for:
+    host: "127.0.0.1"
+    port: "{{ frontend_port }}"
+    delay: 3
+    timeout: 120

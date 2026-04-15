@@ -25,6 +25,7 @@
     quartz_sql_file: "{{ ruoyi_root }}/sql/quartz.sql"
 
   tasks:
+  #参数校验
     - name: Validate required variables
       assert:
         that:
@@ -35,7 +36,7 @@
           - ruoyi_upload_path | length > 0
           - service_user | length > 0
         fail_msg: "mysql_admin_user / mysql_admin_password / mysql_user / mysql_password / ruoyi_upload_path / service_user 不能为空"
-
+#环境部署安装
     - name: Install backend dependencies
       apt:
         name:
@@ -52,26 +53,26 @@
       retries: 6
       delay: 15
       until: apt_install_result is succeeded
-
+#确保mysql数据库服务正常运行
     - name: Ensure mysql service is started and enabled
       systemd:
         name: mysql
         state: started
         enabled: true
-
+#确保redis数据库服务正常运行
     - name: Ensure redis service is started and enabled
       systemd:
         name: redis-server
         state: started
         enabled: true
-
+#clone项目
     - name: Clone RuoYi-Vue source code
       git:
         repo: "{{ ruoyi_repo }}"
         dest: "{{ ruoyi_root }}"
         version: "{{ ruoyi_branch }}"
         force: true
-
+#确保Ruoyi要求的上传文件夹存在
     - name: Ensure upload directory exists
       file:
         path: "{{ ruoyi_upload_path }}"
@@ -79,7 +80,7 @@
         owner: "{{ service_user }}"
         group: "{{ service_user }}"
         mode: "0755"
-
+#确保Ruoyi要求的日志文件夹存在
     - name: Ensure backend log directory exists
       file:
         path: "{{ ruoyi_log_path }}"
@@ -87,7 +88,7 @@
         owner: "{{ service_user }}"
         group: "{{ service_user }}"
         mode: "0755"
-
+#更新Ruoyi的配置文件，配置路径
     - name: Update ruoyi upload path in application.yml
       lineinfile:
         path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application.yml"
@@ -111,7 +112,7 @@
         path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
         regexp: 'password:\s*password'
         replace: "password: {{ mysql_password }}"
-
+#确保数据库存在
     - name: Ensure business database exists
       shell: >
         mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}'

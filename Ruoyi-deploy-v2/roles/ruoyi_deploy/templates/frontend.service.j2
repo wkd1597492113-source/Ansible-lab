@@ -1,0 +1,15 @@
+[Unit]
+Description=RuoYi UI Static Service
+After=network.target
+
+[Service]
+Type=simple
+User={{ frontend_service_user }}
+WorkingDirectory={{ frontend_build_path }}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart={{ serve_bin.stdout | trim }} -s {{ frontend_build_path }} -l {{ frontend_port }}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

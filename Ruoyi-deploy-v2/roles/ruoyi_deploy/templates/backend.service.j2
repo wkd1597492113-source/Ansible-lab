@@ -1,0 +1,14 @@
+[Unit]
+Description=RuoYi Admin Service
+After=network.target mysql.service redis-server.service
+
+[Service]
+Type=simple
+User={{ service_user }}
+WorkingDirectory={{ ruoyi_root }}/ruoyi-admin/target
+ExecStart=/usr/bin/java -jar {{ ruoyi_root }}/ruoyi-admin/target/ruoyi-admin.jar
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
