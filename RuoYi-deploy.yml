@@ -1,0 +1,188 @@
+- name: Deploy RuoYi-Vue backend
+  hosts: web
+  become: true
+  serial: 1
+  vars:
+    ruoyi_repo: "https://github.com/wkd1597492113-source/RuoYi-Vue.git"
+    ruoyi_branch: "main"
+    ruoyi_root: "/home/user/RuoYi-Vue"
+    ruoyi_upload_path: "/home/user/ruoyi/uploadPath"
+    ruoyi_log_path: "/home/ruoyi/logs"
+    mysql_database: "ry-vue"
+    mysql_admin_user: "root"
+    mysql_admin_password: "root"
+    mysql_user: "ruoyi"
+    mysql_password: "ruoyi123"
+    backend_port: 8080
+    service_name: "ruoyi-admin"
+    service_user: "user"
+    ry_sql_file: "{{ ruoyi_root }}/sql/ry_20260321.sql"
+    quartz_sql_file: "{{ ruoyi_root }}/sql/quartz.sql"
+
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - mysql_admin_user | length > 0
+          - mysql_admin_password | length > 0
+          - mysql_password | length > 0
+          - mysql_user | length > 0
+          - ruoyi_upload_path | length > 0
+          - service_user | length > 0
+        fail_msg: "mysql_admin_user / mysql_admin_password / mysql_user / mysql_password / ruoyi_upload_path / service_user 不能为空"
+
+    - name: Install backend dependencies
+      apt:
+        name:
+          - openjdk-17-jre-headless
+          - maven
+          - mysql-server
+          - redis-server
+          - git
+        state: present
+        update_cache: true
+      register: apt_install_result
+      retries: 6
+      delay: 15
+      until: apt_install_result is succeeded
+
+    - name: Ensure mysql service is started and enabled
+      systemd:
+        name: mysql
+        state: started
+        enabled: true
+
+    - name: Ensure redis service is started and enabled
+      systemd:
+        name: redis-server
+        state: started
+        enabled: true
+
+    - name: Clone RuoYi-Vue source code
+      git:
+        repo: "{{ ruoyi_repo }}"
+        dest: "{{ ruoyi_root }}"
+        version: "{{ ruoyi_branch }}"
+        force: true
+
+    - name: Ensure upload directory exists
+      file:
+        path: "{{ ruoyi_upload_path }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0755"
+
+    - name: Ensure backend log directory exists
+      file:
+        path: "{{ ruoyi_log_path }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0755"
+
+    - name: Update ruoyi upload path in application.yml
+      lineinfile:
+        path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application.yml"
+        regexp: '^  profile:'
+        line: "  profile: {{ ruoyi_upload_path }}"
+
+    - name: Update mysql jdbc url in application-druid.yml
+      replace:
+        path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+        regexp: 'url:\s*jdbc:mysql://localhost:3306/ry-vue\?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8'
+        replace: "url: jdbc:mysql://localhost:3306/{{ mysql_database }}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8"
+
+    - name: Update mysql username in application-druid.yml
+      replace:
+        path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+        regexp: 'username:\s*root'
+        replace: "username: {{ mysql_user }}"
+
+    - name: Update mysql password in application-druid.yml
+      replace:
+        path: "{{ ruoyi_root }}/ruoyi-admin/src/main/resources/application-druid.yml"
+        regexp: 'password:\s*password'
+        replace: "password: {{ mysql_password }}"
+
+    - name: Ensure business database exists
+      shell: >
+        mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}'
+        -e "CREATE DATABASE IF NOT EXISTS \`{{ mysql_database }}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+      args:
+        executable: /bin/bash
+
+    - name: Ensure application mysql user exists and has grants
+      shell: >
+        mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ mysql_user }}'@'localhost' IDENTIFIED BY '{{ mysql_password }}';
+        GRANT ALL PRIVILEGES ON \`{{ mysql_database }}\`.* TO '{{ mysql_user }}'@'localhost';
+        FLUSH PRIVILEGES;"
+      args:
+        executable: /bin/bash
+
+    - name: Check whether business schema is initialized
+      shell: >
+        mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' -Nse
+        "SELECT COUNT(*) FROM information_schema.tables
+        WHERE table_schema='{{ mysql_database }}' AND table_name='sys_user';"
+      args:
+        executable: /bin/bash
+      register: ruoyi_schema_ready
+      changed_when: false
+
+    - name: Import ry sql when schema is missing
+      shell: >
+        mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' {{ mysql_database }} < {{ ry_sql_file }}
+      args:
+        executable: /bin/bash
+      when: ruoyi_schema_ready.stdout | trim == "0"
+
+    - name: Import quartz sql when schema is missing
+      shell: >
+        mysql -u{{ mysql_admin_user }} -p'{{ mysql_admin_password }}' {{ mysql_database }} < {{ quartz_sql_file }}
+      args:
+        executable: /bin/bash
+      when: ruoyi_schema_ready.stdout | trim == "0"
+
+    - name: Build backend jar package
+      shell: mvn clean package -DskipTests
+      args:
+        chdir: "{{ ruoyi_root }}"
+        executable: /bin/bash
+
+    - name: Install systemd service for backend
+      copy:
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=RuoYi Admin Service
+          After=network.target mysql.service redis-server.service
+
+          [Service]
+          Type=simple
+          User={{ service_user }}
+          WorkingDirectory={{ ruoyi_root }}/ruoyi-admin/target
+          ExecStart=/usr/bin/java -jar {{ ruoyi_root }}/ruoyi-admin/target/ruoyi-admin.jar
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: true
+
+    - name: Enable and restart backend service
+      systemd:
+        name: "{{ service_name }}"
+        state: restarted
+        enabled: true
+
+    - name: Wait for backend port to be ready
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ backend_port }}"
+        delay: 3
+        timeout: 120
