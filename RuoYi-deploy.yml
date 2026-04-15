@@ -14,7 +14,12 @@
     mysql_user: "ruoyi"
     mysql_password: "ruoyi123"
     backend_port: 8080
+    frontend_port: 1024
+    frontend_build_path: "/home/user/ruoyi/frontend-dist"
+    frontend_api_base_url: "http://{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}:{{ backend_port }}"
     service_name: "ruoyi-admin"
+    frontend_service_name: "ruoyi-ui"
+    frontend_service_user: "root"
     service_user: "user"
     ry_sql_file: "{{ ruoyi_root }}/sql/ry_20260321.sql"
     quartz_sql_file: "{{ ruoyi_root }}/sql/quartz.sql"
@@ -39,6 +44,8 @@
           - mysql-server
           - redis-server
           - git
+          - nodejs
+          - npm
         state: present
         update_cache: true
       register: apt_install_result
@@ -150,6 +157,79 @@
         chdir: "{{ ruoyi_root }}"
         executable: /bin/bash
 
+    - name: Set frontend production API base url
+      lineinfile:
+        path: "{{ ruoyi_root }}/ruoyi-ui/.env.production"
+        regexp: '^VUE_APP_BASE_API='
+        line: 'VUE_APP_BASE_API={{ frontend_api_base_url }}'
+
+    - name: Install frontend dependencies
+      shell: npm install
+      args:
+        chdir: "{{ ruoyi_root }}/ruoyi-ui"
+        executable: /bin/bash
+
+    - name: Build frontend static files
+      shell: npm run build:prod
+      args:
+        chdir: "{{ ruoyi_root }}/ruoyi-ui"
+        executable: /bin/bash
+
+    - name: Install frontend static server
+      shell: npm install -g serve@13
+      args:
+        executable: /bin/bash
+
+    - name: Get serve binary path
+      shell: which serve
+      args:
+        executable: /bin/bash
+      register: serve_bin
+      changed_when: false
+
+    - name: Remove existing frontend artifact directory
+      file:
+        path: "{{ frontend_build_path }}"
+        state: absent
+
+    - name: Ensure frontend artifact directory exists
+      file:
+        path: "{{ frontend_build_path }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0755"
+
+    - name: Copy frontend dist artifacts
+      copy:
+        src: "{{ ruoyi_root }}/ruoyi-ui/dist/"
+        dest: "{{ frontend_build_path }}/"
+        remote_src: true
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: preserve
+
+    - name: Install systemd service for frontend
+      copy:
+        dest: "/etc/systemd/system/{{ frontend_service_name }}.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=RuoYi UI Static Service
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ frontend_service_user }}
+          WorkingDirectory={{ frontend_build_path }}
+          Environment=PATH=/usr/local/bin:/usr/bin:/bin
+          ExecStart={{ serve_bin.stdout | trim }} -s {{ frontend_build_path }} -l {{ frontend_port }}
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
     - name: Install systemd service for backend
       copy:
         dest: "/etc/systemd/system/{{ service_name }}.service"
@@ -180,9 +260,22 @@
         state: restarted
         enabled: true
 
+    - name: Enable and restart frontend service
+      systemd:
+        name: "{{ frontend_service_name }}"
+        state: restarted
+        enabled: true
+
     - name: Wait for backend port to be ready
       wait_for:
         host: "127.0.0.1"
         port: "{{ backend_port }}"
+        delay: 3
+        timeout: 120
+
+    - name: Wait for frontend port to be ready
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ frontend_port }}"
         delay: 3
         timeout: 120
